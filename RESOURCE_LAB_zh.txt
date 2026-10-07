@@ -1,0 +1,68 @@
+MDL {VERSION} — Resource Lab（资源 mod live 化实验，A 方案）
+
+这是 debug 版。与正式版相比多了 “Resource Lab (debug)” 和 “Texture probe (debug)”，其它功能相同。
+
+原理（静态分析 helldivers2.exe 得出）
+  - 引擎只在“加载一个资源包”时才扫描 data 目录里的 <bundle>.patch_0、.patch_1 …，
+    遇到第一个缺号就停止。包卸载后重新加载，会重新扫描。
+  - Arsenal / HD2MM 把 mod 部署到 9ba626afa44a3aa3（= packages/boot，启动包）的 patch，
+    这个包开机加载、从不卸载，所以需要重启。
+  - 游戏的 bundle 几乎都打包在 data\bundles.00.nxa … bundles.29.nxa 里（索引是 data\bundles.nxa），
+    只有约 30 个散文件在 data\。这些游戏文件都是 DSAR 格式（按块 LZ4 压缩），Lab 会自行解压读取；
+    mod 的 patch 是未压缩的，引擎两种都能读。引擎找文件时先查这个索引，查不到再找 data\ 里的散文件，
+    所以放在 data\ 的 <bundle>.patch_N 对打包在容器里的 bundle 同样有效（Arsenal 的启动包 patch 就是这样）。
+  - Resource Lab 只读地扫描索引和容器里每个 bundle 的资源表，找到“资源所属 bundle”，
+    再把 mod 的 patch 复制成它的下一个 patch（放在 data\），
+    这些包下次被游戏加载时（例如换任务、回飞船）就会挂上它，无需重启。
+
+在游戏里的位置
+  ESC → MDL Settings → 主页最下方 “Resource Lab (debug)”：包监视器、最近加载/卸载、已暂存的 mod。
+  库里 RESOURCE / MIXED mod 的详情页 → “Resource Lab (debug)”：查找所属 bundle、暂存、撤销。
+
+建议的测试步骤
+  1. 选一个外观类 RESOURCE mod（例如护甲贴图），先在 Arsenal 里关掉它并 Deploy，
+     确保它不在 packages/boot 的 patch 里。
+  2. 进游戏，打开 Resource Lab，看 “Loaded packages” 和 “packages/boot … PATCHES” 是否正常。
+  3. 在飞船、任务、回飞船之间走一圈，观察 RECENT CHANGES，然后点
+     “Write the package list to the lab log”。
+  4. 打开那个 mod 的 Lab 页 → “Find the game bundles…”，等扫描完成（进度百分比；
+     要读几千个 bundle 的资源表，可能需要一两分钟，期间帧率会略降）。
+     结果会显示：替换已有资源 / 只在 packages/boot / 新资源 各多少个，以及目标 bundle。
+  5. 点 “Stage into N bundle(s)”。如果有“新资源”，需要再点一次确认（可能导致崩溃，见下）。
+  6. 让游戏重新加载这些包（进一局新任务，或回飞船再出发），看日志里是否出现
+     “staged …: <bundle>.patch_N MOUNTED”，并在游戏里看 mod 是否生效。
+  7. 测完点 “Unstage”。如果提示文件正在使用，重启游戏后再点一次。
+
+注意 Deploy
+  - Arsenal / HD2MM 的 Deploy 会重写 data 目录，可能删掉 Lab 暂存的文件。
+    顺序应当是：先在 Arsenal 里关闭 mod 并 Deploy → 进游戏 → 在 Lab 里暂存。
+  - Lab 启动时会检查暂存的文件是否还在，缺失的会显示 MISSING，此时先 Unstage 再重新暂存。
+
+贴图探针（Texture probe，1.7.0 起，仅 debug 版）
+  目的：验证 Lua mod 能否通过 MIX 贴图显示真正的图片（Gui.bitmap + 材质 + Material.set_texture）。
+  1. 关闭游戏，把 MDL-Texture-Probe-1.0.0.zip 导入 Arsenal，启用并 Deploy（它只往启动包加一张
+     256x256 测试贴图 mdl/textures/probe 和同名材质，不改任何游戏资源）。不装它也能测 A。
+  2. 进游戏 → ESC → MDL Settings → 列表底部 “Texture probe (debug)” 设为 ON。
+     打开面板时，左上方会出现一排 5 个方块（A–E），每个下面有结果文字：
+       A perf_hud            游戏自带 GUI 材质，原样（应为纯色/白色方块）
+       B perf+3aa8b87e       同一材质，把贴图槽 3aa8b87e 换成测试贴图
+       C perf+ba25de35       同上，换另一个哈希（对照组）
+       D probe material      探针包自带的材质（复制 perf_hud 结构，贴图指向测试图）
+       E font+88bac99b       字体材质换成测试贴图（多半显示异常，作为对照）
+     测试图案：青→橙渐变、左上黑白棋盘格、黄色圆环、底部从透明到白色的渐变条。
+  3. 拍一张截图，并附上 MDL.log 中以 “texture probe” 开头的几行（含 can_get 结果）。
+  安全措施：只有引擎报告测试贴图/材质已加载时，B–E 才会执行；否则显示 skipped。
+  卸载：Arsenal 里关闭 “MDL Texture Probe (debug)” 并 Deploy。
+
+  1.7.2 起探针改为“防崩溃逐个测试”：
+    顺序 A → A2（perf_hud 换成游戏自己的字体图集，对照组）→ B → D → E → C，每次只跑一个，在屏幕上停留约 1.5 秒才算通过。
+    运行前会把 “<编号>=running” 写入 Logs\MDL-probe-state.txt 并立即写日志。
+    如果游戏崩溃，下次启动时会把那一项标为 CRASHED，之后不再运行，其余项照常继续。
+    想重测全部：删除 Logs\MDL-probe-state.txt。
+
+UI 图集（1.8.0 起）
+  MDL 的包里自带一张 512x512 图标/装饰贴图（mods/mdl/ui_atlas）。设置底部 “UI atlas (debug)” 页面
+  列出所有格子：colour = 彩色图标，mask = 用主题颜色着色的白色图标；orient 格子应为“黄色箭头朝上、
+  红色小方块在左上”。若箭头朝下，打开该页的 “Flip V”。
+  动画（设置 > 动画）在 debug 版默认开启：面板打开时自上而下展开、选中条滑动、档案主题标题后的光标闪烁。
+  “MDL 每帧耗时（关闭 / 打开 / 峰值）” 是 MDL 自身的开销（不含各 mod）。
